@@ -7,6 +7,7 @@ import android.database.sqlite.SQLiteOpenHelper
 import com.stockstatement.inventory.model.DailyStock
 import com.stockstatement.inventory.model.Product
 import com.stockstatement.inventory.model.ProductPrices
+import com.stockstatement.inventory.model.StarterInventory
 import com.stockstatement.inventory.model.UnitValues
 import java.time.LocalDate
 
@@ -50,7 +51,92 @@ class InventoryDatabase(context: Context) :
         )
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            db.execSQL(
+                "CREATE TABLE app_metadata (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)"
+            )
+        }
+    }
+
+    fun initializeStarterInventory(): Boolean {
+        val db = writableDatabase
+        var imported = false
+        db.beginTransaction()
+        try {
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS app_metadata (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)"
+            )
+            val alreadyInitialized = db.query(
+                "app_metadata",
+                arrayOf("value"),
+                "key = ?",
+                arrayOf(STARTER_IMPORT_KEY),
+                null,
+                null,
+                null
+            ).use { it.moveToFirst() }
+
+            if (!alreadyInitialized) {
+                val hasProducts = db.rawQuery("SELECT EXISTS(SELECT 1 FROM products LIMIT 1)", null)
+                    .use { it.moveToFirst() && it.getInt(0) == 1 }
+                if (!hasProducts) {
+                    StarterInventory.products.forEach { starter ->
+                        val productId = db.insertOrThrow(
+                            "products",
+                            null,
+                            ContentValues().apply {
+                                put("name", starter.name)
+                                put("category", starter.category)
+                                put("price_q", starter.prices.q)
+                                put("price_p", starter.prices.p)
+                                put("price_n", starter.prices.n)
+                                put("price_d", starter.prices.d)
+                            }
+                        )
+                        val closing = starter.closingOnSourceDate
+                        db.insertOrThrow(
+                            "daily_stock",
+                            null,
+                            ContentValues().apply {
+                                put("product_id", productId)
+                                put("date", StarterInventory.sourceDate.toString())
+                                put("opening_q", closing.q)
+                                put("opening_p", closing.p)
+                                put("opening_n", closing.n)
+                                put("opening_d", closing.d)
+                                put("receipts_q", 0)
+                                put("receipts_p", 0)
+                                put("receipts_n", 0)
+                                put("receipts_d", 0)
+                                put("closing_q", closing.q)
+                                put("closing_p", closing.p)
+                                put("closing_n", closing.n)
+                                put("closing_d", closing.d)
+                                put("price_q", starter.prices.q)
+                                put("price_p", starter.prices.p)
+                                put("price_n", starter.prices.n)
+                                put("price_d", starter.prices.d)
+                            }
+                        )
+                    }
+                    imported = true
+                }
+                db.insertOrThrow(
+                    "app_metadata",
+                    null,
+                    ContentValues().apply {
+                        put("key", STARTER_IMPORT_KEY)
+                        put("value", "1")
+                    }
+                )
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        return imported
+    }
 
     fun getProducts(): List<Product> {
         val result = mutableListOf<Product>()
@@ -225,6 +311,7 @@ class InventoryDatabase(context: Context) :
 
     companion object {
         private const val DATABASE_NAME = "stock-statement.db"
-        private const val DATABASE_VERSION = 1
+        private const val DATABASE_VERSION = 2
+        private const val STARTER_IMPORT_KEY = "starter_inventory_imported"
     }
 }

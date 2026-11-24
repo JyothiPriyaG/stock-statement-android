@@ -4,9 +4,13 @@ import android.database.sqlite.SQLiteException
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -15,11 +19,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -33,8 +39,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -47,10 +51,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -72,7 +79,14 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-private enum class AppTab { DAILY, PRODUCTS }
+private enum class AppPage { STATEMENT, PRODUCTS }
+
+private val productColumnWidth = 176.dp
+private val valueColumnWidth = 58.dp
+private val statementTableWidth = productColumnWidth + valueColumnWidth * 20
+private val gridLine = Color(0xFF8A918A)
+private val headingBackground = Color(0xFFE7ECE7)
+private val categoryBackground = Color(0xFFDCE5DC)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -83,7 +97,8 @@ fun InventoryApp(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var selectedDate by remember { mutableStateOf(LocalDate.now()) }
-    var selectedTab by remember { mutableStateOf(AppTab.DAILY) }
+    var page by remember { mutableStateOf(AppPage.STATEMENT) }
+    var isEditing by remember { mutableStateOf(false) }
     var products by remember { mutableStateOf(emptyList<Product>()) }
     var stocks by remember { mutableStateOf(emptyList<DailyStock>()) }
     var reloadKey by remember { mutableStateOf(0) }
@@ -96,20 +111,20 @@ fun InventoryApp(
     var isAddingProduct by remember { mutableStateOf(false) }
     var productToDelete by remember { mutableStateOf<Product?>(null) }
 
-    LaunchedEffect(reloadKey) {
-        try {
-            products = withContext(Dispatchers.IO) { database.getProducts() }
-        } catch (error: SQLiteException) {
-            message = error.localizedMessage ?: "Could not load products."
-            messageIsError = true
-        }
-    }
     LaunchedEffect(selectedDate, reloadKey) {
         isLoading = true
         try {
+            val importedStarter = withContext(Dispatchers.IO) {
+                database.initializeStarterInventory()
+            }
+            products = withContext(Dispatchers.IO) { database.getProducts() }
             stocks = withContext(Dispatchers.IO) { database.getDailyStock(selectedDate) }
+            if (importedStarter) {
+                message = "Starter balances from 23 Nov are ready to review. Check quantities and unit prices."
+                messageIsError = false
+            }
         } catch (error: SQLiteException) {
-            message = error.localizedMessage ?: "Could not load this day's stock."
+            message = error.localizedMessage ?: "Could not load the stock statement."
             messageIsError = true
         } finally {
             isLoading = false
@@ -139,20 +154,41 @@ fun InventoryApp(
         }
     }
 
+    fun saveDay(advanceToNextDay: Boolean) {
+        scope.launch {
+            isSaving = true
+            try {
+                withContext(Dispatchers.IO) {
+                    database.saveDailyStock(selectedDate, stocks)
+                }
+                isEditing = false
+                if (advanceToNextDay) {
+                    selectedDate = selectedDate.plusDays(1)
+                    message = "Saved. Closing balances are ready as the next day's opening balances."
+                } else {
+                    message = "Stock saved for $selectedDate."
+                }
+                messageIsError = false
+            } catch (error: SQLiteException) {
+                message = error.localizedMessage ?: "Could not save this day's stock."
+                messageIsError = true
+            } finally {
+                isSaving = false
+            }
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Stock Statement") },
+                title = { Text(if (page == AppPage.STATEMENT) "Stock Statement" else "Products") },
                 actions = {
-                    if (selectedTab == AppTab.DAILY) {
-                        TextButton(onClick = {
-                            csvLauncher.launch("stock-statement-$selectedDate.csv")
-                        }) {
-                            Text("CSV")
+                    if (page == AppPage.STATEMENT) {
+                        TextButton(onClick = { isEditing = !isEditing }) {
+                            Text(if (isEditing) "Done" else "Edit")
                         }
-                        TextButton(onClick = { onPrint(selectedDate, stocks) }) {
-                            Text("Print")
-                        }
+                    } else {
+                        TextButton(onClick = { page = AppPage.STATEMENT }) { Text("Sheet") }
                     }
                 }
             )
@@ -163,33 +199,22 @@ fun InventoryApp(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            TabRow(selectedTabIndex = selectedTab.ordinal) {
-                Tab(
-                    selected = selectedTab == AppTab.DAILY,
-                    onClick = { selectedTab = AppTab.DAILY },
-                    text = { Text("Daily stock") }
-                )
-                Tab(
-                    selected = selectedTab == AppTab.PRODUCTS,
-                    onClick = { selectedTab = AppTab.PRODUCTS },
-                    text = { Text("Products") }
-                )
-            }
-
             if (message != null) {
                 Text(
                     text = message.orEmpty(),
                     color = if (messageIsError) MaterialTheme.colorScheme.error
                     else MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    style = MaterialTheme.typography.bodySmall
                 )
             }
 
-            when (selectedTab) {
-                AppTab.DAILY -> DailyStockScreen(
+            when (page) {
+                AppPage.STATEMENT -> StatementScreen(
                     date = selectedDate,
                     stocks = stocks,
                     loading = isLoading,
+                    editing = isEditing,
                     saving = isSaving,
                     onDateClick = { showDatePicker = true },
                     onPreviousDay = { selectedDate = selectedDate.minusDays(1) },
@@ -197,46 +222,24 @@ fun InventoryApp(
                     onStockChange = { changed ->
                         stocks = stocks.map { if (it.productId == changed.productId) changed else it }
                     },
-                    onSave = {
-                        scope.launch {
-                            isSaving = true
-                            try {
-                                withContext(Dispatchers.IO) {
-                                    database.saveDailyStock(selectedDate, stocks)
-                                }
-                                message = "Stock saved for $selectedDate."
-                                messageIsError = false
-                            } catch (error: SQLiteException) {
-                                message = error.localizedMessage ?: "Could not save this day's stock."
-                                messageIsError = true
-                            } finally {
-                                isSaving = false
-                            }
-                        }
+                    onProducts = { page = AppPage.PRODUCTS },
+                    onExport = { csvLauncher.launch("stock-statement-$selectedDate.csv") },
+                    onPrint = { onPrint(selectedDate, stocks) },
+                    onDiscard = {
+                        isEditing = false
+                        reloadKey++
                     },
-                    onSaveAndNext = {
-                        scope.launch {
-                            isSaving = true
-                            try {
-                                withContext(Dispatchers.IO) {
-                                    database.saveDailyStock(selectedDate, stocks)
-                                }
-                                selectedDate = selectedDate.plusDays(1)
-                                message = "Saved. The next day's opening balances use these closing balances."
-                                messageIsError = false
-                            } catch (error: SQLiteException) {
-                                message = error.localizedMessage ?: "Could not save this day's stock."
-                                messageIsError = true
-                            } finally {
-                                isSaving = false
-                            }
-                        }
-                    }
+                    onSave = { saveDay(false) },
+                    onSaveAndNext = { saveDay(true) }
                 )
 
-                AppTab.PRODUCTS -> ProductListScreen(
+                AppPage.PRODUCTS -> ProductListScreen(
                     products = products,
-                    onAdd = { isAddingProduct = true },
+                    onBack = { page = AppPage.STATEMENT },
+                    onAdd = {
+                        isAddingProduct = true
+                        editedProduct = null
+                    },
                     onEdit = { editedProduct = it },
                     onDelete = { productToDelete = it }
                 )
@@ -254,12 +257,12 @@ fun InventoryApp(
             confirmButton = {
                 TextButton(onClick = {
                     datePickerState.selectedDateMillis?.let { millis ->
-                        selectedDate = Instant.ofEpochMilli(millis).atZone(ZoneOffset.UTC).toLocalDate()
+                        selectedDate = Instant.ofEpochMilli(millis)
+                            .atZone(ZoneOffset.UTC)
+                            .toLocalDate()
                     }
                     showDatePicker = false
-                }) {
-                    Text("Select")
-                }
+                }) { Text("Select") }
             },
             dismissButton = {
                 TextButton(onClick = { showDatePicker = false }) { Text("Cancel") }
@@ -323,15 +326,20 @@ fun InventoryApp(
 }
 
 @Composable
-private fun DailyStockScreen(
+private fun StatementScreen(
     date: LocalDate,
     stocks: List<DailyStock>,
     loading: Boolean,
+    editing: Boolean,
     saving: Boolean,
     onDateClick: () -> Unit,
     onPreviousDay: () -> Unit,
     onNextDay: () -> Unit,
     onStockChange: (DailyStock) -> Unit,
+    onProducts: () -> Unit,
+    onExport: () -> Unit,
+    onPrint: () -> Unit,
+    onDiscard: () -> Unit,
     onSave: () -> Unit,
     onSaveAndNext: () -> Unit
 ) {
@@ -339,148 +347,340 @@ private fun DailyStockScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(horizontal = 8.dp, vertical = 2.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            TextButton(onClick = onPreviousDay) { Text("‹") }
+            TextButton(onClick = onPreviousDay) { Text("Previous") }
             TextButton(onClick = onDateClick) {
                 Text(date.format(DateTimeFormatter.ofPattern("dd MMM yyyy", Locale.getDefault())))
             }
-            TextButton(onClick = onNextDay) { Text("›") }
+            TextButton(onClick = onNextDay) { Text("Next") }
         }
 
         if (loading) {
-            Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
                 Text("Loading stock…")
             }
         } else if (stocks.isEmpty()) {
-            Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
                 Text("Add products to start your stock statement.")
             }
         } else {
-            LazyColumn(
+            SpreadsheetTable(
+                stocks = stocks,
+                editing = editing,
                 modifier = Modifier.weight(1f),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                    start = 12.dp, end = 12.dp, bottom = 12.dp
-                ),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                onStockChange = onStockChange
+            )
+        }
+
+        if (editing) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(stocks, key = { it.productId }) { stock ->
-                    DailyStockCard(stock = stock, onChange = onStockChange)
+                OutlinedButton(
+                    onClick = onDiscard,
+                    enabled = !saving,
+                    modifier = Modifier.weight(1f)
+                ) { Text("Discard") }
+                OutlinedButton(
+                    onClick = onSave,
+                    enabled = stocks.isNotEmpty() && !loading && !saving,
+                    modifier = Modifier.weight(1f)
+                ) { Text(if (saving) "Saving…" else "Save day") }
+                Button(
+                    onClick = onSaveAndNext,
+                    enabled = stocks.isNotEmpty() && !loading && !saving,
+                    modifier = Modifier.weight(1.2f)
+                ) { Text("Save & next") }
+            }
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                TextButton(onClick = onProducts) { Text("Products") }
+                TextButton(onClick = onExport) { Text("Spreadsheet") }
+                TextButton(onClick = onPrint) { Text("Print") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SpreadsheetTable(
+    stocks: List<DailyStock>,
+    editing: Boolean,
+    modifier: Modifier = Modifier,
+    onStockChange: (DailyStock) -> Unit
+) {
+    val horizontalState = rememberScrollState()
+    val verticalState = rememberScrollState()
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .horizontalScroll(horizontalState)
+            .verticalScroll(verticalState)
+    ) {
+        Column(modifier = Modifier.width(statementTableWidth)) {
+            SpreadsheetHeader()
+            stocks.groupBy { it.category }.forEach { (category, categoryStocks) ->
+                Box(
+                    modifier = Modifier
+                        .width(statementTableWidth)
+                        .height(30.dp)
+                        .background(categoryBackground)
+                        .border(1.dp, gridLine)
+                        .padding(horizontal = 6.dp),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    Text(
+                        category.uppercase(Locale.getDefault()),
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                categoryStocks.forEach { stock ->
+                    SpreadsheetProductRow(
+                        stock = stock,
+                        editing = editing,
+                        onChange = onStockChange
+                    )
+                }
+            }
+            SpreadsheetTotals(stocks)
+        }
+    }
+}
+
+@Composable
+private fun SpreadsheetHeader() {
+    Row(verticalAlignment = Alignment.Top) {
+        HeaderCell("Product", productColumnWidth, height = 68.dp, bold = true)
+        Column {
+            Row {
+                HeaderCell("Opening Balance", valueColumnWidth * 4, height = 34.dp, bold = true)
+                HeaderCell("Receipts", valueColumnWidth * 4, height = 34.dp, bold = true)
+                HeaderCell("Closing Balance", valueColumnWidth * 4, height = 34.dp, bold = true)
+                HeaderCell("Sales", valueColumnWidth * 4, height = 34.dp, bold = true)
+                HeaderCell("Amount", valueColumnWidth * 4, height = 34.dp, bold = true)
+            }
+            Row {
+                repeat(5) {
+                    PackUnit.entries.forEach { unit ->
+                        HeaderCell(unit.label, valueColumnWidth, height = 34.dp, bold = true)
+                    }
                 }
             }
         }
+    }
+}
 
-        Row(
+@Composable
+private fun HeaderCell(label: String, width: androidx.compose.ui.unit.Dp, height: androidx.compose.ui.unit.Dp, bold: Boolean) {
+    Box(
+        modifier = Modifier
+            .width(width)
+            .height(height)
+            .background(headingBackground)
+            .border(1.dp, gridLine)
+            .padding(horizontal = 2.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            textAlign = TextAlign.Center,
+            fontSize = 11.sp,
+            lineHeight = 13.sp,
+            fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal
+        )
+    }
+}
+
+@Composable
+private fun SpreadsheetProductRow(
+    stock: DailyStock,
+    editing: Boolean,
+    onChange: (DailyStock) -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                .width(productColumnWidth)
+                .height(38.dp)
+                .background(Color.White)
+                .border(1.dp, gridLine)
+                .padding(horizontal = 5.dp),
+            contentAlignment = Alignment.CenterStart
         ) {
-            OutlinedButton(
-                onClick = onSave,
-                enabled = stocks.isNotEmpty() && !loading && !saving,
-                modifier = Modifier.weight(1f)
-            ) {
-                Text(if (saving) "Saving…" else "Save day")
-            }
-            Button(
-                onClick = onSaveAndNext,
-                enabled = stocks.isNotEmpty() && !loading && !saving,
-                modifier = Modifier.weight(1f)
-            ) {
-                Text("Save & next day")
-            }
+            Text(stock.productName, maxLines = 1, fontSize = 11.sp)
+        }
+        PackUnit.entries.forEach { unit ->
+            QuantityCell(
+                stock.productId,
+                "opening-${unit.name}",
+                stock.opening[unit],
+                editing
+            ) { onChange(stock.withOpening(unit, it)) }
+        }
+        PackUnit.entries.forEach { unit ->
+            QuantityCell(
+                stock.productId,
+                "receipts-${unit.name}",
+                stock.receipts[unit],
+                editing
+            ) { onChange(stock.withReceipts(unit, it)) }
+        }
+        PackUnit.entries.forEach { unit ->
+            QuantityCell(
+                stock.productId,
+                "closing-${unit.name}",
+                stock.closing[unit],
+                editing
+            ) { onChange(stock.withClosing(unit, it)) }
+        }
+        PackUnit.entries.forEach { unit ->
+            ValueCell(stock.salesFor(unit).toString())
+        }
+        PackUnit.entries.forEach { unit ->
+            ValueCell(formatAmount(stock.amountFor(unit)))
         }
     }
 }
 
 @Composable
-private fun DailyStockCard(stock: DailyStock, onChange: (DailyStock) -> Unit) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Text(stock.productName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Text(stock.category, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary)
-            Spacer(Modifier.height(8.dp))
-            PackUnit.entries.forEach { unit ->
-                Column(modifier = Modifier.padding(vertical = 3.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            unit.label,
-                            modifier = Modifier.width(24.dp),
-                            fontWeight = FontWeight.Bold
-                        )
-                        QuantityInput("OB", stock.opening[unit]) { onChange(stock.withOpening(unit, it)) }
-                        Spacer(Modifier.width(4.dp))
-                        QuantityInput("Receipts", stock.receipts[unit]) { onChange(stock.withReceipts(unit, it)) }
-                        Spacer(Modifier.width(4.dp))
-                        QuantityInput("CB", stock.closing[unit]) { onChange(stock.withClosing(unit, it)) }
+private fun QuantityCell(
+    productId: Long,
+    field: String,
+    value: Long,
+    editing: Boolean,
+    onChange: (Long) -> Unit
+) {
+    var entry by remember(productId, field, editing) { mutableStateOf(value.toString()) }
+    var focused by remember { mutableStateOf(false) }
+    LaunchedEffect(value, focused) {
+        if (!focused) entry = value.toString()
+    }
+
+    if (editing) {
+        Box(
+            modifier = Modifier
+                .width(valueColumnWidth)
+                .height(38.dp)
+                .background(Color.White)
+                .border(1.dp, MaterialTheme.colorScheme.primary)
+                .padding(horizontal = 2.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            BasicTextField(
+                value = entry,
+                onValueChange = { input ->
+                    if (input.isEmpty() || input.all(Char::isDigit)) {
+                        entry = input
+                        if (input.isEmpty()) onChange(0) else input.toLongOrNull()?.let(onChange)
                     }
-                    Row(
-                        modifier = Modifier.padding(start = 28.dp, top = 2.dp),
-                        horizontalArrangement = Arrangement.spacedBy(14.dp)
-                    ) {
-                        Text("Sales: ${stock.salesFor(unit)}", style = MaterialTheme.typography.bodySmall)
-                        Text(
-                            "Amount: ${formatAmount(stock.amountFor(unit))}",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                }
-            }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onFocusChanged { focused = it.isFocused },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                textStyle = TextStyle(
+                    fontSize = 12.sp,
+                    textAlign = TextAlign.Center,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            )
         }
+    } else {
+        ValueCell(value.toString())
     }
 }
 
 @Composable
-private fun QuantityInput(label: String, value: Long, onChange: (Long) -> Unit) {
-    OutlinedTextField(
-        value = value.toString(),
-        onValueChange = { input ->
-            if (input.isEmpty() || input.all(Char::isDigit)) onChange(input.toLongOrNull() ?: 0L)
-        },
-        modifier = Modifier.width(82.dp),
-        label = { Text(label, fontSize = 10.sp, maxLines = 1) },
-        singleLine = true,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-    )
+private fun ValueCell(value: String) {
+    Box(
+        modifier = Modifier
+            .width(valueColumnWidth)
+            .height(38.dp)
+            .background(Color.White)
+            .border(1.dp, gridLine)
+            .padding(horizontal = 2.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(value, textAlign = TextAlign.Center, fontSize = 10.sp, maxLines = 1)
+    }
+}
+
+@Composable
+private fun SpreadsheetTotals(stocks: List<DailyStock>) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            modifier = Modifier
+                .width(productColumnWidth)
+                .height(40.dp)
+                .background(headingBackground)
+                .border(1.dp, gridLine)
+                .padding(horizontal = 5.dp),
+            contentAlignment = Alignment.CenterStart
+        ) {
+            Text("TOTAL", fontWeight = FontWeight.Bold, fontSize = 11.sp)
+        }
+        repeat(12) { ValueCell("") }
+        PackUnit.entries.forEach { unit ->
+            ValueCell(stocks.sumOf { it.salesFor(unit) }.toString())
+        }
+        PackUnit.entries.forEach { unit ->
+            ValueCell(formatAmount(stocks.sumOf { it.amountFor(unit) }))
+        }
+    }
 }
 
 @Composable
 private fun ProductListScreen(
     products: List<Product>,
+    onBack: () -> Unit,
     onAdd: () -> Unit,
     onEdit: (Product) -> Unit,
     onDelete: (Product) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.End
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Button(onClick = onAdd) { Text("Add product") }
+            TextButton(onClick = onBack) { Text("Statement") }
+            TextButton(onClick = onAdd) { Text("Add product") }
         }
         if (products.isEmpty()) {
-            Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
                 Text("No products yet.")
             }
         } else {
             LazyColumn(
                 modifier = Modifier.weight(1f),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                    start = 12.dp, end = 12.dp, bottom = 12.dp
-                ),
+                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(products, key = { it.id }) { product ->
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(12.dp),
+                            modifier = Modifier.fillMaxWidth().padding(10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(product.name, style = MaterialTheme.typography.titleMedium)
+                                Text(product.name, style = MaterialTheme.typography.titleSmall)
                                 Text(
                                     "${product.category} · " + PackUnit.entries.joinToString("  ") {
                                         "${it.label} ${formatAmount(product.prices[it])}"
@@ -509,8 +709,10 @@ private fun ProductEditorDialog(
     var category by remember(product) { mutableStateOf(product?.category ?: "Wine") }
     var categoryExpanded by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    val priceText = remember(product) {
-        mutableStateOf(PackUnit.entries.associateWith { product?.prices?.get(it)?.toString().orEmpty() })
+    var priceText by remember(product) {
+        mutableStateOf(PackUnit.entries.associateWith {
+            product?.prices?.get(it)?.toString().orEmpty()
+        })
     }
 
     Dialog(
@@ -525,9 +727,7 @@ private fun ProductEditorDialog(
             shape = RoundedCornerShape(20.dp)
         ) {
             Column(
-                modifier = Modifier
-                    .padding(20.dp)
-                    .verticalScroll(rememberScrollState()),
+                modifier = Modifier.padding(20.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
@@ -550,7 +750,9 @@ private fun ProductEditorDialog(
                         onValueChange = {},
                         readOnly = true,
                         label = { Text("Category") },
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(categoryExpanded) },
+                        trailingIcon = {
+                            ExposedDropdownMenuDefaults.TrailingIcon(categoryExpanded)
+                        },
                         modifier = Modifier.fillMaxWidth().menuAnchor()
                     )
                     ExposedDropdownMenu(
@@ -571,10 +773,10 @@ private fun ProductEditorDialog(
                 Text("Unit prices (₹)", style = MaterialTheme.typography.titleSmall)
                 PackUnit.entries.forEach { unit ->
                     OutlinedTextField(
-                        value = priceText.value[unit].orEmpty(),
+                        value = priceText[unit].orEmpty(),
                         onValueChange = { value ->
                             if (value.isEmpty() || value.all(Char::isDigit)) {
-                                priceText.value = priceText.value + (unit to value)
+                                priceText = priceText + (unit to value)
                             }
                         },
                         label = { Text("${unit.label} price") },
@@ -583,9 +785,7 @@ private fun ProductEditorDialog(
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
                     )
                 }
-                if (error != null) {
-                    Text(error.orEmpty(), color = MaterialTheme.colorScheme.error)
-                }
+                if (error != null) Text(error.orEmpty(), color = MaterialTheme.colorScheme.error)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End
@@ -593,14 +793,14 @@ private fun ProductEditorDialog(
                     TextButton(onClick = onDismiss) { Text("Cancel") }
                     TextButton(onClick = {
                         val parsedPrices = PackUnit.entries.mapNotNull { unit ->
-                            val text = priceText.value[unit].orEmpty()
+                            val text = priceText[unit].orEmpty()
                             val value = text.toLongOrNull()
                             if (text.isNotBlank() && (value == null || value < 0)) null
                             else unit to (value ?: 0L)
                         }.toMap()
                         if (name.isBlank()) {
                             error = "Enter a product name."
-                        } else if (PackUnit.entries.any { priceText.value[it].isNullOrBlank() }) {
+                        } else if (PackUnit.entries.any { priceText[it].isNullOrBlank() }) {
                             error = "Enter a price for each unit (use 0 if not sold)."
                         } else if (parsedPrices.size != PackUnit.entries.size) {
                             error = "Enter a valid whole-rupee price for each unit."
@@ -628,4 +828,4 @@ private fun ProductEditorDialog(
 }
 
 private fun formatAmount(amount: Long): String =
-    "₹" + java.text.NumberFormat.getIntegerInstance(Locale("en", "IN")).format(amount)
+    java.text.NumberFormat.getIntegerInstance(Locale("en", "IN")).format(amount)
